@@ -40,6 +40,7 @@ jobs:
           VITE_FIREBASE_APP_ID: ${{ vars.VITE_FIREBASE_APP_ID }}
           VITE_FIREBASE_MESSAGING_SENDER_ID: ${{ vars.VITE_FIREBASE_MESSAGING_SENDER_ID }}
           VITE_FIREBASE_STORAGE_BUCKET: ${{ vars.VITE_FIREBASE_STORAGE_BUCKET }}
+          VITE_GOOGLE_OAUTH_CLIENT_ID: ${{ vars.VITE_GOOGLE_OAUTH_CLIENT_ID || '162308988172-fgm6ei5uvpodbqtnjcijijfq5e3bj7le.apps.googleusercontent.com' }}
           VITE_BASE_PATH: ${{ vars.VITE_BASE_PATH || '/agent-z/' }}
       - name: Configure Pages
         uses: actions/configure-pages@v5

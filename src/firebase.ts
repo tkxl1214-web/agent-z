@@ -13,7 +13,6 @@ import {
   type Auth
 } from 'firebase/auth';
 import { getFirestore } from 'firebase/firestore';
-import { getFunctions } from 'firebase/functions';
 
 const env = import.meta.env;
 const config = {
@@ -42,7 +41,6 @@ if (app) {
 
 export const auth = initializedAuth;
 export const firestore = app ? getFirestore(app) : null;
-export const functions = app ? getFunctions(app, 'asia-northeast3') : null;
 
 export async function signInWithGoogle(): Promise<void> {
   if (!auth) throw new Error('Firebase 설정이 아직 완료되지 않았습니다.');

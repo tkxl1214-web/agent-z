@@ -29,7 +29,17 @@ export default defineConfig(({ mode }) => {
         },
         workbox: {
           navigateFallback: 'index.html',
-          globPatterns: ['**/*.{js,css,html,ico,png,svg,webmanifest}']
+          globPatterns: ['**/*.{js,css,html,ico,png,svg,webmanifest}'],
+          runtimeCaching: [
+            {
+              urlPattern: /\.wasm$/,
+              handler: 'CacheFirst',
+              options: {
+                cacheName: 'agent-z-onnx-runtime',
+                expiration: { maxEntries: 4, maxAgeSeconds: 31_536_000 }
+              }
+            }
+          ]
         }
       })
     ],

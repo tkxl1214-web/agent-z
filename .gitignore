@@ -6,8 +6,6 @@ design-reference/
 !.env.example
 functions/node_modules/
 functions/lib/
-functions/.env*
-functions/.secret.local
 android/.gradle/
 ios/Pods/
 .firebase/

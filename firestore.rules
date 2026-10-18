@@ -17,11 +17,25 @@ service cloud.firestore {
 
     match /users/{userId}/conversations/{conversationId} {
       allow read: if signedInAs(userId);
-      allow write: if false;
+      allow create, update: if signedInAs(userId)
+        && request.resource.data.keys().hasOnly(['id', 'title', 'updatedAt'])
+        && request.resource.data.id == conversationId
+        && request.resource.data.title is string
+        && request.resource.data.title.size() <= 54
+        && request.resource.data.updatedAt == request.time;
+      allow delete: if signedInAs(userId);
 
       match /messages/{messageId} {
         allow read: if signedInAs(userId);
-        allow write: if false;
+        allow create: if signedInAs(userId)
+          && request.resource.data.keys().hasOnly(['role', 'content', 'createdAt'])
+          && request.resource.data.role in ['user', 'assistant']
+          && request.resource.data.content is string
+          && request.resource.data.content.size() > 0
+          && request.resource.data.content.size() <= 20000
+          && request.resource.data.createdAt == request.time;
+        allow update: if false;
+        allow delete: if signedInAs(userId);
       }
     }
 

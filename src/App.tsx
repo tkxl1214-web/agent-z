@@ -1,5 +1,7 @@
 import { useCallback, useEffect, useRef, useState, type FormEvent, type KeyboardEvent } from 'react';
 import { onAuthStateChanged, type User } from 'firebase/auth';
+import { Capacitor } from '@capacitor/core';
+import { useGoogleLogin } from '@react-oauth/google';
 import {
   ArrowDown,
   ArrowUp,
@@ -19,8 +21,18 @@ import {
   Trash2,
   X
 } from 'lucide-react';
-import { addMemory, listMemories, listMessages, listThreads, removeMemory, removeThread, sendMessage, type ChatMessage, type Memory, type Thread } from './data';
+import { addMemory, listMemories, listMessages, listThreads, LOCAL_USER_ID, removeMemory, removeThread, sendMessage, type ChatMessage, type Memory, type Thread } from './data';
 import { auth, firebaseReady, signInWithGoogle, signOutAgentZ } from './firebase';
+
+type LocalGoogleUser = {
+  uid: string;
+  email: string;
+  displayName: string;
+  photoURL: string | null;
+  localOnly: true;
+};
+
+type AgentZUser = User | LocalGoogleUser;
 
 const logo = import.meta.env.BASE_URL + 'icons/agent-z-mark.png';
 const suggestions = [
@@ -37,37 +49,32 @@ function MessageText({ children }: { children: string }) {
 function MemoryDialog({
   user,
   onClose,
-  onSignIn,
   notify
 }: {
-  user: User | null;
+  user: AgentZUser | null;
   onClose: () => void;
-  onSignIn: () => void;
   notify: (message: string) => void;
 }) {
   const [memories, setMemories] = useState<Memory[]>([]);
   const [draft, setDraft] = useState('');
   const [busy, setBusy] = useState(false);
+  const ownerId = user?.uid || LOCAL_USER_ID;
+  const accountSync = Boolean(user && firebaseReady && !('localOnly' in user));
 
   useEffect(() => {
-    if (!user) return;
-    listMemories(user.uid).then(setMemories).catch(() => notify('기억을 불러오지 못했습니다.'));
-  }, [user?.uid, notify]);
+    listMemories(ownerId).then(setMemories).catch(() => notify('기억을 불러오지 못했습니다.'));
+  }, [ownerId, notify]);
 
   async function handleAdd(event: FormEvent) {
     event.preventDefault();
     const value = draft.trim();
-    if (!user) {
-      notify('기억을 관리하려면 Google 계정으로 로그인해 주세요.');
-      return;
-    }
     if (!value || value.length > 400) return;
     setBusy(true);
     try {
-      await addMemory(user.uid, value);
-      setMemories(await listMemories(user.uid));
+      await addMemory(ownerId, value);
+      setMemories(await listMemories(ownerId));
       setDraft('');
-      notify('Agent Z의 기억에 저장했어요.');
+      notify(accountSync ? 'Agent Z 계정 기억에 저장했어요.' : '이 기기의 Agent Z 기억에 저장했어요.');
     } catch {
       notify('저장하지 못했습니다. Firebase 설정을 확인해 주세요.');
     } finally {
@@ -76,9 +83,8 @@ function MemoryDialog({
   }
 
   async function handleRemove(id: string) {
-    if (!user) return;
     try {
-      await removeMemory(user.uid, id);
+      await removeMemory(ownerId, id);
       setMemories((items) => items.filter((item) => item.id !== id));
     } catch {
       notify('기억을 삭제하지 못했습니다.');
@@ -99,13 +105,7 @@ function MemoryDialog({
           <button className="icon-button quiet" aria-label="닫기" onClick={onClose}><X size={19} /></button>
         </div>
 
-        {!user ? (
-          <div className="memory-empty login-needed">
-            <p>기억은 Google 계정에 안전하게 보관됩니다.</p>
-            <button className="text-action" onClick={onSignIn}>Google 로그인 후 사용할 수 있어요</button>
-          </div>
-        ) : (
-          <>
+        <>
             <form className="memory-form" onSubmit={handleAdd}>
               <textarea
                 value={draft}
@@ -139,22 +139,24 @@ function MemoryDialog({
                 </div>
               ))}
             </div>
-            <p className="privacy-note">저장된 내용은 언제든지 삭제할 수 있으며, Agent Z의 기본 모델을 재학습시키지는 않습니다.</p>
-          </>
-        )}
+            <p className="privacy-note">{accountSync
+              ? '저장된 기억은 이 Google 계정에 보관되며, 언제든지 삭제할 수 있습니다. 기억은 모델을 재학습시키지 않습니다.'
+              : '저장된 기억은 이 브라우저와 Google 로그인 프로필에 맞춰 이 기기에 보관됩니다. Firebase를 연결하면 계정 간 동기화를 사용할 수 있습니다.'}</p>
+        </>
       </section>
     </div>
   );
 }
 
 export default function App() {
-  const [user, setUser] = useState<User | null>(null);
+  const [user, setUser] = useState<AgentZUser | null>(null);
   const [authLoading, setAuthLoading] = useState(true);
   const [threads, setThreads] = useState<Thread[]>([]);
   const [activeThreadId, setActiveThreadId] = useState<string | null>(null);
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [draft, setDraft] = useState('');
   const [busy, setBusy] = useState(false);
+  const [aiStatus, setAiStatus] = useState('');
   const [loadingHistory, setLoadingHistory] = useState(false);
   const [memoryOpen, setMemoryOpen] = useState(false);
   const [userMenuOpen, setUserMenuOpen] = useState(false);
@@ -163,11 +165,37 @@ export default function App() {
   const [installPrompt, setInstallPrompt] = useState<(Event & { prompt: () => Promise<void>; userChoice: Promise<{ outcome: string }> }) | null>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const ownerId = user?.uid || LOCAL_USER_ID;
 
   const notify = useCallback((message: string) => {
     setToast(message);
     window.setTimeout(() => setToast(''), 3400);
   }, []);
+
+  const googleLogin = useGoogleLogin({
+    scope: 'openid email profile',
+    onSuccess: async (token) => {
+      try {
+        const response = await fetch('https://openidconnect.googleapis.com/v1/userinfo', {
+          headers: { Authorization: `Bearer ${token.access_token}` }
+        });
+        if (!response.ok) throw new Error('Google 프로필을 불러오지 못했습니다.');
+        const profile = await response.json() as { sub?: string; email?: string; name?: string; picture?: string };
+        if (!profile.sub || !profile.email) throw new Error('Google 계정 정보를 확인하지 못했습니다.');
+        setUser({
+          uid: `google-local-${profile.sub}`,
+          email: profile.email,
+          displayName: profile.name || profile.email,
+          photoURL: profile.picture || null,
+          localOnly: true
+        });
+        notify('Google 로그인했습니다. Firebase 동기화 설정 전까지 기록은 이 기기에 저장됩니다.');
+      } catch (error) {
+        notify(error instanceof Error ? error.message : 'Google 계정 정보를 불러오지 못했습니다.');
+      }
+    },
+    onError: () => notify('Google 로그인에 실패했습니다. OAuth 승인 도메인을 확인해 주세요.')
+  });
 
   useEffect(() => {
     if (!auth) {
@@ -199,14 +227,10 @@ export default function App() {
   }, [draft]);
 
   useEffect(() => {
-    if (!user) {
-      setThreads([]);
-      return;
-    }
-    listThreads(user.uid)
+    listThreads(ownerId)
       .then(setThreads)
       .catch(() => notify('대화 목록을 불러오지 못했습니다.'));
-  }, [user]);
+  }, [ownerId, notify]);
 
   useEffect(() => {
     if (messages.length && scrollRef.current) {
@@ -216,20 +240,25 @@ export default function App() {
 
   async function handleSignIn() {
     if (!firebaseReady) {
-      notify('Google 로그인을 연결하려면 README의 Firebase 설정을 완료해 주세요.');
+      if (Capacitor.isNativePlatform()) {
+        notify('네이티브 앱의 Google 로그인에는 Firebase Web 설정과 플랫폼별 서비스 파일이 필요합니다.');
+        return;
+      }
+      googleLogin();
       return;
     }
     try {
       await signInWithGoogle();
     } catch (error) {
       const code = (error as { code?: string }).code;
-      notify(code === 'auth/popup-closed-by-user' ? '로그인 창을 닫았습니다.' : 'Google 로그인에 실패했습니다. Firebase의 승인 도메인을 확인해 주세요.');
+      notify(code === 'auth/popup-closed-by-user' ? '로그인 창을 닫았습니다.' : 'Google 로그인에 실패했습니다. Firebase와 승인 도메인을 확인해 주세요.');
     }
   }
 
   async function handleSignOut() {
     try {
       await signOutAgentZ();
+      setUser(null);
       setUserMenuOpen(false);
       setActiveThreadId(null);
       setMessages([]);
@@ -255,11 +284,11 @@ export default function App() {
   }
 
   async function openThread(thread: Thread) {
-    if (!user || loadingHistory) return;
+    if (loadingHistory) return;
     setLoadingHistory(true);
     setSidebarOpen(false);
     try {
-      const history = await listMessages(user.uid, thread.id);
+      const history = await listMessages(ownerId, thread.id);
       setActiveThreadId(thread.id);
       setMessages(history);
     } catch {
@@ -270,9 +299,8 @@ export default function App() {
   }
 
   async function deleteThread(threadId: string) {
-    if (!user) return;
     try {
-      await removeThread(threadId);
+      await removeThread(ownerId, threadId);
       setThreads((items) => items.filter((item) => item.id !== threadId));
       if (activeThreadId === threadId) handleNewChat();
       notify('대화를 삭제했습니다.');
@@ -285,11 +313,6 @@ export default function App() {
     event?.preventDefault();
     const text = draft.trim();
     if (!text || busy) return;
-    if (!user) {
-      await handleSignIn();
-      return;
-    }
-
     const threadId = activeThreadId || crypto.randomUUID();
     const optimisticId = 'pending-' + Date.now();
     const optimisticMessage: ChatMessage = { id: optimisticId, role: 'user', content: text };
@@ -297,22 +320,31 @@ export default function App() {
     setMessages((items) => [...items, optimisticMessage]);
     setDraft('');
     setBusy(true);
+    setAiStatus('기기에서 Agent Z를 준비하고 있어요…');
 
     try {
-      const reply = await sendMessage(text, threadId);
+      const memories = await listMemories(ownerId);
+      const reply = await sendMessage(
+        text,
+        threadId,
+        messages.filter((item) => !item.id.startsWith('pending-')),
+        memories,
+        ownerId,
+        setAiStatus
+      );
       setMessages((items) => [...items, {
         id: 'reply-' + Date.now(),
         role: 'assistant',
         content: reply
       }]);
-      setThreads(await listThreads(user.uid));
+      setThreads(await listThreads(ownerId));
     } catch (error) {
       setMessages((items) => items.filter((item) => item.id !== optimisticId));
       setDraft(text);
-      const code = (error as { code?: string }).code;
-      notify(code === 'functions/resource-exhausted' ? '오늘 사용할 수 있는 대화 횟수에 도달했습니다.' : '답변을 가져오지 못했습니다. 서버 설정을 확인하고 다시 시도해 주세요.');
+      notify(error instanceof Error ? error.message : '답변을 가져오지 못했습니다. 다시 시도해 주세요.');
     } finally {
       setBusy(false);
+      setAiStatus('');
     }
   }
 
@@ -369,9 +401,7 @@ export default function App() {
             <button className="icon-button mini" aria-label="새 대화" onClick={handleNewChat}><Plus size={16} /></button>
           </div>
           <div className="thread-list">
-            {!user ? (
-              <div className="sidebar-hint">로그인하면 대화를 저장하고 어디서나 이어갈 수 있어요.</div>
-            ) : threads.length === 0 ? (
+            {threads.length === 0 ? (
               <div className="sidebar-hint">아직 대화가 없어요.<br />새로운 생각을 시작해 보세요.</div>
             ) : threads.map((thread) => (
               <div className={'thread-row' + (activeThreadId === thread.id ? ' selected' : '')} key={thread.id}>
@@ -410,7 +440,7 @@ export default function App() {
             ) : (
               <button className="profile-button signed-out" onClick={() => void handleSignIn()}>
                 <span className="avatar guest-avatar">Z</span>
-                <span className="profile-label"><b>{authLoading ? '확인 중…' : '로그인'}</b><small>{firebaseReady ? 'Google 계정으로 시작' : 'Firebase 연결 필요'}</small></span>
+                <span className="profile-label"><b>{authLoading ? '확인 중…' : '로그인'}</b><small>{firebaseReady ? '기기 간 동기화' : 'Google 로그인 · 기기 저장'}</small></span>
                 <ArrowDown size={15} className="profile-chevron" />
               </button>
             )}
@@ -426,7 +456,7 @@ export default function App() {
             <span className="topbar-context">{activeThreadId ? '대화' : '새로운 대화'}</span>
           </div>
           <div className="topbar-right">
-            <span className="model-pill"><span className="model-dot" /> GPT-6.1 Sol</span>
+            <span className="model-pill" title="대화는 기기 안의 공개 가중치 모델로 생성됩니다."><span className="model-dot" /> Agent Z · 기기 내 AI</span>
             {installPrompt && (
               <button className="install-app" onClick={() => void handleInstall()} title="Agent Z 앱 설치">
                 <Download size={14} /><span>앱 설치</span>
@@ -469,7 +499,8 @@ export default function App() {
                   <span className="google-g">G</span> Google 계정으로 시작하기 <ArrowUp size={15} />
                 </button>
               )}
-              {!firebaseReady && <p className="setup-caption">로그인과 AI 연결은 배포 설정 후 사용할 수 있습니다.</p>}
+              <p className="setup-caption">첫 사용 시 AI 모델 약 650MB를 내려받습니다. GPU가 없는 기기는 더 큰 모델을 내려받고 답변이 느릴 수 있어요.</p>
+              {!firebaseReady && <p className="setup-caption">Google 로그인은 가능하며, Firebase 설정 전까지 대화와 기억은 로그인한 기기에 저장됩니다.</p>}
             </section>
           ) : (
             <section className="conversation" aria-live="polite">
@@ -491,7 +522,7 @@ export default function App() {
               {busy && (
                 <article className="message-row assistant-message">
                   <span className="message-avatar"><img src={logo} alt="Agent Z" /></span>
-                  <div className="message-content"><div className="message-author">Agent Z</div><div className="typing-indicator"><i /><i /><i /></div></div>
+                  <div className="message-content"><div className="message-author">Agent Z</div><div className="typing-indicator"><i /><i /><i /></div><p className="ai-progress">{aiStatus}</p></div>
                 </article>
               )}
               <div className="scroll-anchor" />
@@ -508,7 +539,7 @@ export default function App() {
               onKeyDown={handleKeyDown}
               rows={1}
               maxLength={8_000}
-              placeholder={user ? 'Agent Z에게 무엇이든 물어보세요…' : '무엇이든 입력하고 Google 로그인 후 대화를 시작하세요…'}
+              placeholder="Agent Z에게 무엇이든 물어보세요…"
               aria-label="Agent Z에게 메시지 보내기"
               disabled={busy}
             />
@@ -531,7 +562,7 @@ export default function App() {
         </div>
       </main>
 
-      {memoryOpen && <MemoryDialog user={user} onClose={() => setMemoryOpen(false)} onSignIn={() => void handleSignIn()} notify={notify} />}
+      {memoryOpen && <MemoryDialog user={user} onClose={() => setMemoryOpen(false)} notify={notify} />}
       {toast && <div className="toast" role="status"><Check size={16} /> {toast}</div>}
     </div>
   );
